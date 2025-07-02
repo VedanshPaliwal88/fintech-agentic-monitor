@@ -1,0 +1,13 @@
+agno
+groq
+python-dotenv
+
+beautifulsoup4
+requests
+
+sentence-transformers
+chromadb
+
+tavily-python
+
+schedule

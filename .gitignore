@@ -1,0 +1,27 @@
+# --- Secrets ---
+.env
+
+# --- Python ---
+# Virtual environment folder
+venv/
+/venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# --- Runtime Data & Logs ---
+# ChromaDB persistent database
+db/
+/db/
+
+# Log files
+*.log
+monitor.log
+
+# State file
+state.json
+
+# --- IDE/Editor specific ---
+.idea/
+.vscode/
