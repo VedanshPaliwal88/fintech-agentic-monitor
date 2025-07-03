@@ -56,9 +56,30 @@ Handles user queries by:
 4. **Configure Environment Variables**
     - Copy .env.example to .env
     - Update values as needed
-5. **Run the orchestrator**
-    ```bash
-    python orchestrator.py
+
+5. **Running the System**
+
+   #### 5.1 One-time Database Back-fill (Recommended First Step)
+
+   To give your agent a deep historical context, you should first run the backfill process. This will scrape all available articles from the configured tag pages and load them into the vector database.
+
+   > **Warning:** This may take several minutes to complete.
+
+   Run the following command:
+
+   ```bash
+   python orchestrator.py --backfill
+   ```
+
+   #### 5.2 To Run the Main System (Subsequent Accesses)
+
+   After the initial backfill, run the main orchestrator to start the autonomous system:
+
+   ```bash
+   python orchestrator.py
+   ```
+
+
 
 ## Future Work & Improvements
 - Web UI: Create a simple web interface (using Streamlit or Flask) for a more user-friendly Q&A experience.

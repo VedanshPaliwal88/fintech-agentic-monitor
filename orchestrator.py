@@ -5,6 +5,7 @@ import time
 import hashlib
 from datetime import datetime
 from typing import List, Dict
+import argparse
 
 from dotenv import load_dotenv
 import requests
@@ -92,6 +93,58 @@ class AgentOrchestrator:
     def _save_state(self, state: Dict):
         with open(SETTINGS["state_file"], "w") as f:
             json.dump(state, f, indent=4)
+
+    def backfill_historical_articles(self):
+        """
+        Scrapes all available articles from the tag pages to populate the database.
+        This is a one-time or infrequent operation to build historical context.
+        """
+        logger.info("🚀 Starting historical backfill process. This may take a while...")
+        
+        # Use a dictionary keyed by link to store unique articles, avoiding duplicates
+        unique_articles_to_process = {}
+
+        for tag_name, tag_path in SETTINGS["tags_of_interest"].items():
+            logger.info(f"🔎 Scraping historical articles for tag: {tag_name}")
+            try:
+                tag_url = f"{SETTINGS['base_url']}{tag_path}"
+                response = self._make_request(tag_url)
+                if not response:
+                    continue
+
+                soup = BeautifulSoup(response.content, 'html.parser')
+                # Use find_all to get every article card on the page
+                article_cards = soup.find_all("article", class_="gh-card")
+                logger.info(f"Found {len(article_cards)} article cards on the page for '{tag_name}'.")
+
+                for card in article_cards:
+                    link_element = card.find("a", class_="gh-card-link")
+                    if link_element and 'href' in link_element.attrs:
+                        link = link_element['href']
+                        if link not in unique_articles_to_process:
+                            title = (link_element.find("h3", class_="gh-card-title") or link_element).text.strip()
+                            unique_articles_to_process[link] = {
+                                'tag': tag_name,
+                                'title': title,
+                                'link': link
+                            }
+
+            except Exception as e:
+                logger.error(f"Error scraping tag '{tag_name}': {e}", exc_info=True)
+
+        total_found = len(unique_articles_to_process)
+        if total_found == 0:
+            logger.info("🏁 No historical articles found to process.")
+            return
+
+        logger.info(f"Found a total of {total_found} unique historical articles to process.")
+        
+        for i, article_info in enumerate(unique_articles_to_process.values()):
+            logger.info(f"Backfilling article {i+1}/{total_found}: {article_info['title']}")
+            # We can reuse our existing, robust tool for extraction and storage!
+            self.extract_and_store_content_tool(article_info)
+        
+        logger.info("✅ Historical backfill process complete.")
 
     def check_for_new_articles_tool(self):
         logger.info("🔍 Checking for new articles...")
@@ -263,22 +316,35 @@ class AgentOrchestrator:
         return [" ".join(words[i:i + SETTINGS["chunk_size_words"]]) for i in range(0, len(words), SETTINGS["chunk_size_words"])]
 
 if __name__ == "__main__":
-    orchestrator = AgentOrchestrator()
-    logger.info("\n" + "="*50 + "\nRUNNING INITIAL MONITORING CYCLE\n" + "="*50)
-    
-    # FIX 3: Removed redundant logging. The function logs its own summary.
-    orchestrator.run_monitoring_cycle()
+    parser = argparse.ArgumentParser(
+        description="Agentic Newsletter Monitor for 'This Week in Fintech'."
+    )
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Run the historical backfill process to populate the database with all available articles."
+    )
+    args = parser.parse_args()
 
-    print("\n" + "="*50)
-    print("INTERACTIVE Q&A MODE - type 'quit' to exit")
-    print("="*50)
-    while True:
-        try:
-            question = input("\nYour question: ")
-            if question.lower().strip() == 'quit': break
-            if not question: continue
-            answer = orchestrator.answer_question(question)
-            print(f"\n🤖 AI Answer:\n{answer}")
-        except (KeyboardInterrupt, EOFError):
-            print("\nExiting...")
-            break
+    orchestrator = AgentOrchestrator()
+
+    if args.backfill:
+        orchestrator.backfill_historical_articles()
+
+    else:
+        logger.info("\n" + "="*50 + "\nRUNNING INITIAL MONITORING CYCLE\n" + "="*50)
+        orchestrator.run_monitoring_cycle()
+
+        print("\n" + "="*50)
+        print("INTERACTIVE Q&A MODE - type 'quit' to exit")
+        print("="*50)
+        while True:
+            try:
+                question = input("\nYour question: ")
+                if question.lower().strip() == 'quit': break
+                if not question: continue
+                answer = orchestrator.answer_question(question)
+                print(f"\n🤖 AI Answer:\n{answer}")
+            except (KeyboardInterrupt, EOFError):
+                print("\nExiting...")
+                break
