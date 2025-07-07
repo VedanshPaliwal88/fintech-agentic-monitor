@@ -28,7 +28,7 @@ load_dotenv()
 SETTINGS = {
     "base_url": "https://thisweekinfintech.com",
     "rss_feed_url" : "https://thisweekinfintech.com/rss",
-    "tags_of_interest": {
+    "backfill_tags": {
         "North America": "/tag/us",
         "Asia/India": "/tag/asia",
         "Stablecoins": "/tag/weekly-stable"
@@ -42,6 +42,15 @@ SETTINGS = {
     "retry_attempts": 3,
     "retry_delay_seconds": 5
 }
+
+def load_user_config():
+    """Loads the user's category preferences from a JSON file."""
+    try:
+        with open("user_config.json", "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # If the file doesn't exist or is invalid, return a default
+        return {"enabled_categories": []}
 
 class AgentOrchestrator:
     def __init__(self):
@@ -102,15 +111,15 @@ class AgentOrchestrator:
 
     def backfill_historical_articles(self):
         """
-        Scrapes all available articles from the tag pages to populate the database.
-        This is a one-time or infrequent operation to build historical context.
+        Scrapes all available articles from specific tag pages to populate the database.
+        This uses the old web scraping method for historical data not in the RSS feed.
         """
         logger.info("🚀 Starting historical backfill process. This may take a while...")
         
         # Use a dictionary keyed by link to store unique articles, avoiding duplicates
         unique_articles_to_process = {}
 
-        for tag_name, tag_path in SETTINGS["tags_of_interest"].items():
+        for tag_name, tag_path in SETTINGS["backfill_tags"].items():
             logger.info(f"🔎 Scraping historical articles for tag: {tag_name}")
             try:
                 tag_url = f"{SETTINGS['base_url']}{tag_path}"
@@ -154,7 +163,7 @@ class AgentOrchestrator:
 
     def check_rss_for_new_articles_tool(self):
         '''
-        Checks the rss feed for new articles using their GUID.
+        Checks the rss feed for new articles using their GUID and category.
         '''
         logger.info("🔍 Checking RSS feed for new articles...")
         state = self._load_state()
@@ -162,24 +171,37 @@ class AgentOrchestrator:
         processed_guids = set(state.get("processed_guids", []))
         new_articles_to_process = []
 
-        feed = feedparser.parse(SETTINGS["rss_feed_url"])
+        user_config = load_user_config()
+        allowed_categories = set(user_config.get("enabled_categories", []))
 
+        feed = feedparser.parse(SETTINGS["rss_feed_url"])
 
         for entry in feed.entries:
             guid = entry.id
             if guid not in processed_guids:
-                logger.info(f"New article found via RSS: {entry.title}")
-                new_articles_to_process.append({
-                    'guid': guid,
-                    'title': entry.title,
-                    'link': entry.link,
-                    'pubDate': entry.published,
-                    'full_content_html': entry.content[0].value if entry.content else entry.summary
-                })
+                mathed_category = None
+                if hasattr(entry, 'tags'):
+                    for tag in entry.tags:
+                        if tag.term in allowed_categories:
+                            mathed_category = tag.term
+                            break
+                if mathed_category:
+                    logger.info(f"New article found via RSS: {entry.title}")
+                    new_articles_to_process.append({
+                        'guid': guid,
+                        'title': entry.title,
+                        'link': entry.link,
+                        'pubDate': entry.published,
+                        'full_content_html': entry.content[0].value if entry.content else entry.summary
+                    })
+                else:
+                    logger.info(f"Skipping new irrelevant article: {entry.title}")
+
                 processed_guids.add(guid)
 
         if not new_articles_to_process:
             logger.info("No new articles found in the RSS feed.")
+
         self._save_state({"processed_guids": list(processed_guids)})
         return new_articles_to_process
     
@@ -309,7 +331,8 @@ class AgentOrchestrator:
             2.  Use the "Live Web Search Results" to supplement, verify, or provide more recent information if the newsletters are outdated or lack detail.
             3.  Synthesize a single, coherent answer. Do not simply list the different sources.
             4.  If the sources conflict, acknowledge the discrepancy.
-            5.  If neither source contains the necessary information, state that. Do not use external knowledge.
+            5. Always specify the newsletter title and the sources used for the information
+            6.  If neither source contains the necessary information, state that. Do not use external knowledge.
 
             **Newsletter Context:**
             ---
