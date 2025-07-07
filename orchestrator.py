@@ -6,6 +6,8 @@ import hashlib
 from datetime import datetime
 from typing import List, Dict
 import argparse
+import feedparser
+import html2text
 
 from dotenv import load_dotenv
 import requests
@@ -25,6 +27,7 @@ load_dotenv()
 # --- Application Settings ---
 SETTINGS = {
     "base_url": "https://thisweekinfintech.com",
+    "rss_feed_url" : "https://thisweekinfintech.com/rss",
     "tags_of_interest": {
         "North America": "/tag/us",
         "Asia/India": "/tag/asia",
@@ -54,7 +57,10 @@ class AgentOrchestrator:
             name="newsletter_content"
         )
         self.tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-        
+        self.html_parser = html2text.HTML2Text()
+        self.html_parser.ignore_links = True
+        self.html_parser.ignore_images = True
+
         self._setup_agents()
         logger.info("Orchestrator initialized successfully.")
 
@@ -64,7 +70,7 @@ class AgentOrchestrator:
             name="NewsletterMonitor",
             role="Checks for new newsletter articles across specified topics.",
             goal="Identify and report new articles since the last check.",
-            tools=[self.check_for_new_articles_tool]
+            tools=[self.check_rss_for_new_articles_tool]
         )
         self.content_agent = Agent(
             name="ContentExtractor",
@@ -81,14 +87,14 @@ class AgentOrchestrator:
         logger.info("Agents have been configured.")
 
     # --- Core Logic and Tools (Omitted for brevity, they are unchanged) ---
-    def _load_state(self):
+    def _load_state(self) -> Dict:
         try:
             if os.path.exists(SETTINGS["state_file"]):
                 with open(SETTINGS["state_file"], "r") as f:
                     return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
-            logger.warning("State file not found or corrupted. Starting with a fresh state.")
-        return {"last_checked_links": {}}
+            pass
+        return {"processed_guids": {}}
 
     def _save_state(self, state: Dict):
         with open(SETTINGS["state_file"], "w") as f:
@@ -146,68 +152,98 @@ class AgentOrchestrator:
         
         logger.info("✅ Historical backfill process complete.")
 
-    def check_for_new_articles_tool(self):
-        logger.info("🔍 Checking for new articles...")
+    def check_rss_for_new_articles_tool(self):
+        '''
+        Checks the rss feed for new articles using their GUID.
+        '''
+        logger.info("🔍 Checking RSS feed for new articles...")
         state = self._load_state()
-        last_checked_links = state.get("last_checked_links", {})
-        new_articles_to_process = []
-        for tag_name, tag_path in SETTINGS["tags_of_interest"].items():
-            try:
-                tag_url = f"{SETTINGS['base_url']}{tag_path}"
-                response = self._make_request(tag_url)
-                if not response: continue
-                soup = BeautifulSoup(response.content, 'html.parser')
-                latest_article_card = soup.find("article", class_="gh-card")
-                if not latest_article_card:
-                    logger.warning(f"No article cards found for tag: {tag_name}")
-                    continue
-                link_element = latest_article_card.find("a", class_="gh-card-link")
-                if link_element and 'href' in link_element.attrs:
-                    article_link = link_element['href']
-                    if last_checked_links.get(tag_name) != article_link:
-                        title = (link_element.find("h3", class_="gh-card-title") or link_element).text.strip()
-                        logger.info(f"✅ NEW article found for {tag_name}: {title}")
-                        new_articles_to_process.append({'tag': tag_name, 'title': title, 'link': article_link})
-                        last_checked_links[tag_name] = article_link
-                    else:
-                        logger.info(f"ℹ️ No new articles for tag: {tag_name}")
-                else:
-                    logger.warning(f"Could not find valid link for latest article in tag: {tag_name}")
-            except Exception as e:
-                logger.error(f"Error checking tag '{tag_name}': {e}", exc_info=True)
-        self._save_state({"last_checked_links": last_checked_links})
-        return new_articles_to_process
 
+        processed_guids = set(state.get("processed_guids", []))
+        new_articles_to_process = []
+
+        feed = feedparser.parse(SETTINGS["rss_feed_url"])
+
+
+        for entry in feed.entries:
+            guid = entry.id
+            if guid not in processed_guids:
+                logger.info(f"New article found via RSS: {entry.title}")
+                new_articles_to_process.append({
+                    'guid': guid,
+                    'title': entry.title,
+                    'link': entry.link,
+                    'pubDate': entry.published,
+                    'full_content_html': entry.content[0].value if entry.content else entry.summary
+                })
+                processed_guids.add(guid)
+
+        if not new_articles_to_process:
+            logger.info("No new articles found in the RSS feed.")
+        self._save_state({"processed_guids": list(processed_guids)})
+        return new_articles_to_process
+    
     def extract_and_store_content_tool(self, article_info: Dict[str, str]):
-        article_url = f"{SETTINGS['base_url']}{article_info['link']}"
-        logger.info(f"📄 Extracting content from: {article_info['title']} ({article_url})")
+        '''
+        Receives raw content and stores it
+        Can receive html through RSS or fetch it via a link
+        '''
         try:
-            response = self._make_request(article_url)
-            if not response: return f"Failed to fetch content for {article_info['title']}."
-            soup = BeautifulSoup(response.content, 'html.parser')
-            content_container = soup.find("article", class_="gh-article")
-            if not content_container:
-                logger.error(f"Could not find article content container for: {article_info['title']}")
-                return "Content container not found."
-            article_text = content_container.get_text(separator="\n", strip=True)
-            chunks = self._chunk_text(article_text)
+            if article_info.get('full_content_html'):
+                logger.info(f"Processing content for article: '{article_info['title']}' directly from RSS feed")
+                html_content = article_info['full_content_html']
+            else:
+                article_url = f"{SETTINGS['base_url']}{article_info['link']}"
+                logger.info(f"Fetching content for: {article_info['title']} ({article_url})")
+                response = self._make_request(article_url)
+                if not response: return f"Failed to fetch content for {article_info['title']}."
+                soup = BeautifulSoup(response.content, 'html.parser')
+                content_container = soup.find("article", class_="gh-article")
+                if not content_container:
+                    return f"Content container not found for {article_info['title']}."
+                html_content = str(content_container)
+
+            plain_text = self.html_parser.handle(html_content)
+            chunks = self._chunk_text(plain_text)
+
             article_id = hashlib.sha256(article_info['link'].encode()).hexdigest()
-            embeddings, documents, metadatas, ids = [], [], [], []
-            for i, chunk in enumerate(chunks):
-                enhanced_chunk = f"Article Title: {article_info['title']}\nTag: {article_info['tag']}\n\n{chunk}"
-                documents.append(enhanced_chunk)
-                metadatas.append({"title": article_info['title'], "tag": article_info['tag'], "timestamp": datetime.now().isoformat(), "link": article_info['link'], "chunk_id": i})
-                ids.append(f"{article_id}_{i}")
-            if documents:
-                embeddings = self.embedding_model.encode(documents).tolist()
-                self.collection.add(embeddings=embeddings, documents=documents, metadatas=metadatas, ids=ids)
-                logger.info(f"💾 Stored {len(chunks)} chunks for '{article_info['title']}' in the vector database.")
-                return f"Successfully extracted and stored {len(chunks)} chunks from '{article_info['title']}'."
+
+            if self._store_chunks(article_id, article_info, chunks):
+                return f"Successfully extracted and stored {len(chunks)} chunks from '{article_info['title']}."
             else:
                 return "No content to store."
+    
         except Exception as e:
-            logger.error(f"Error extracting or storing content for '{article_info['title']}': {e}", exc_info=True)
-            return f"An error occurred during extraction: {e}"
+            logger.error(f"Error extracting/storing '{article_info['title']}': {e}", exc_info=True)
+            return f"An error occured during extraction: {e}"
+        
+    def _store_chunks(self, article_id: str, article_info: Dict, chunks: List[str]) -> bool:
+        '''
+        Helper to handle vector db storage logic
+        '''
+        if not chunks:
+            return False
+
+        embeddings, documents, metadatas, ids = [], [], [], []
+        for i, chunk in enumerate(chunks):
+            enhanced_chunk = f"Article Title: {article_info['title']}\nTag: {article_info.get('tag', 'N/A')}\n\n{chunk}"
+            documents.append(enhanced_chunk)
+            metadatas.append({
+                "title": article_info['title'],
+                "tag": article_info.get('tag', 'N/A'),
+                "timestamp": article_info.get('pubDate', datetime.now().isoformat()),
+                "link": article_info['link'],
+                "chunk_id": i
+            })
+            ids.append(f"{article_id}_{i}")
+
+        if documents:
+            embeddings_list = self.embedding_model.encode(documents).tolist()
+            self.collection.add(embeddings=embeddings_list, documents=documents, metadatas=metadatas, ids=ids)
+            logger.info(f"💾 Stored {len(chunks)} chunks for '{article_info['title']}' in the vector database.")
+            return True
+        return False
+
 
     def retrieve_context_tool(self, query: str, n_results: int = 5):
         """Searches the internal vector DB for context relevant to the query."""
@@ -235,13 +271,17 @@ class AgentOrchestrator:
             return "Web search failed."
 
     def run_monitoring_cycle(self):
-        logger.info("🚀 Starting new monitoring cycle...")
-        new_articles = self.monitor_agent.tools[0]()
+        '''Daily monitoring for updates using RSS'''
+        logger.info("🚀 Starting new monitoring cycle using RSS feed...")
+        new_articles = self.check_rss_for_new_articles_tool()
+
         if not new_articles:
-            logger.info("🏁 Monitoring cycle complete. No new articles found.")
             return
+        
         logger.info(f"Found {len(new_articles)} new articles to process.")
-        processing_summaries = [self.content_agent.tools[0](article_info=article) for article in new_articles]
+
+        processing_summaries = [self.extract_and_store_content_tool(article) for article in new_articles]
+        
         final_summary = f"🏁 Monitoring cycle complete.\nProcessed {len(new_articles)} new articles.\n" + "\n".join(processing_summaries)
         logger.info(final_summary)
 

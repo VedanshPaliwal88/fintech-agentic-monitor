@@ -4,6 +4,8 @@ python-dotenv
 
 beautifulsoup4
 requests
+feedparser 
+html2text
 
 sentence-transformers
 chromadb
